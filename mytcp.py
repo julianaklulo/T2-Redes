@@ -6,6 +6,7 @@ from mytcputils import (
     FLAGS_RST,
     FLAGS_ACK,
     make_header,
+    MSS,
     read_header,
     fix_checksum,
 )
@@ -74,6 +75,7 @@ class Conexao:
 
         self.last_seq = last_seq
         self.buffer = b''
+        self.aberto = True
         # id_conexao = (src_addr, src_port, dst_addr, dst_port)
 
     def _exemplo_timer(self):
@@ -84,7 +86,9 @@ class Conexao:
         # TODO: trate aqui o recebimento de segmentos provenientes da camada de rede.
         # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
         # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
-        if seq_no == self.last_seq:
+        if not self.aberto:
+            return
+        if seq_no == self.last_seq and payload:
             self.last_seq = seq_no + len(payload)
             self.buffer += payload
             self.callback(self, payload)
@@ -92,8 +96,14 @@ class Conexao:
                 self.id_conexao[3], self.id_conexao[1], self.my_seq, self.last_seq, FLAGS_ACK
             )
             self.servidor.rede.enviar(fix_checksum(ack_segment, self.id_conexao[0], self.id_conexao[2]), self.id_conexao[0])
-        # print("recebido payload: %r" % payload)
-
+        elif (flags & FLAGS_FIN) == FLAGS_FIN:
+            self.callback(self, b'')
+            self.last_seq += 1
+            ack_segment = make_header(
+                self.id_conexao[3], self.id_conexao[1], self.my_seq, self.last_seq, FLAGS_ACK
+            )
+            self.servidor.rede.enviar(fix_checksum(ack_segment, self.id_conexao[0], self.id_conexao[2]), self.id_conexao[0])
+            self.aberto = False
     # Os métodos abaixo fazem parte da API
 
     def registrar_recebedor(self, callback):
@@ -107,17 +117,28 @@ class Conexao:
         """
         Usado pela camada de aplicação para enviar dados
         """
-        # TODO: implemente aqui o envio de dados.
-        # Chame self.servidor.rede.enviar(segmento, dest_addr) para enviar o segmento
-        # que você construir para a camada de rede.
-        ack_segment = make_header(
-            self.id_conexao[3], self.id_conexao[1], self.my_seq, self.last_seq, FLAGS_ACK
-        )
-        self.servidor.rede.enviar(fix_checksum(ack_segment + dados, self.id_conexao[0], self.id_conexao[2]), self.id_conexao[2])
+        if len(dados) / MSS <= 1:
+            ack_segment = make_header(
+                self.id_conexao[3], self.id_conexao[1], self.my_seq, self.last_seq, FLAGS_ACK
+            )
+            self.servidor.rede.enviar(fix_checksum(ack_segment + dados, self.id_conexao[0], self.id_conexao[2]), self.id_conexao[2])
+        else:
+            qtd = len(dados) // MSS
+            for i in range(qtd):
+                payload = dados[:MSS]
+                ack_segment = make_header(
+                    self.id_conexao[3], self.id_conexao[1], self.my_seq + len(payload), self.last_seq, FLAGS_ACK
+                )
+                self.servidor.rede.enviar(fix_checksum(ack_segment + payload, self.id_conexao[0], self.id_conexao[2]), self.id_conexao[2])
+                self.my_seq += len(payload)
+                dados = dados[MSS:]
 
     def fechar(self):
         """
         Usado pela camada de aplicação para fechar a conexão
         """
         # TODO: implemente aqui o fechamento de conexão
-        pass
+        ack_segment = make_header(
+            self.id_conexao[3], self.id_conexao[1], self.my_seq, self.last_seq, FLAGS_ACK | FLAGS_FIN
+        )
+        self.servidor.rede.enviar(fix_checksum(ack_segment, self.id_conexao[0], self.id_conexao[2]), self.id_conexao[2])
